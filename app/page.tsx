@@ -412,7 +412,7 @@ export default function LoginPage() {
     window.print()
   }
 
-  const salaryItems: SalaryItem[] = salary
+  const salaryItems: any[] = salary
     ? [
         {
           label: t.basicSalaryRow,
