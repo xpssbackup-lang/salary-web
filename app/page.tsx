@@ -28,7 +28,7 @@ type Payroll = {
   leave_deduction: number
   leave_bonus: number
   extra_fee: number
-  extra_fee_type: string | null
+  extra_fee_type: "income" | "deduction" | null
   actual_salary: number
   note: string | null
 }
