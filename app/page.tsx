@@ -259,6 +259,7 @@ export default function LoginPage() {
 
     setEmployeeInfo(user)
     setSalary(payroll as Payroll)
+    console.log("PAYROLL LOADED =", payroll)
   }
 
   const findEmployeeByLogin = async () => {
