@@ -421,7 +421,7 @@ export default function LoginPage() {
       },
       {
         label: "押金",
-        type: "income",
+        type: "deduction",
         amount: Number(salary.deposit || 0),
       },
       {
