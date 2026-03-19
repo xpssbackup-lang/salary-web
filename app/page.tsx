@@ -412,51 +412,56 @@ export default function LoginPage() {
     window.print()
   }
 
-  const salaryItems: any[] = salary
-    ? [
-        {
-          label: t.basicSalaryRow,
-          type: "income",
-          amount: Number(salary.basic_salary || 0),
-        },
-        {
-          label: t.allowanceRow,
-          type: "income",
-          amount: Number(salary.allowance || 0),
-        },
-        {
-          label: t.bonusRow,
-          type: "income",
-          amount: Number(salary.bonus || 0),
-        },
-        {
-          label: t.performanceRow,
-          type: "income",
-          amount: Number(salary.performance || 0),
-        },
-        {
-          label: t.leaveDeductionRow,
-          type: "deduction",
-          amount: Number(salary.leave_deduction || 0),
-        },
-        {
-          label: t.leaveBonusRow,
-          type: "income",
-          amount: Number(salary.leave_bonus || 0),
-        },
-        {
-          label: t.extraFeeRow,
-          type:
-            salary.extra_fee_type === "deduction" ? "deduction" : "income",
-          amount: Number(salary.extra_fee || 0),
-        },
-        {
-          label: t.deductionRow,
-          type: "deduction",
-          amount: Number(salary.deduction || 0),
-        },
-      ].filter((item) => Number(item.amount || 0) !== 0)
-    : []
+ const salaryItems: any[] = salary
+  ? [
+      {
+        label: t.basicSalaryRow,
+        type: "income",
+        amount: Number(salary.basic_salary || 0),
+      },
+      {
+        label: "押金",
+        type: "income",
+        amount: Number(salary.deposit || 0),
+      },
+      {
+        label: t.allowanceRow,
+        type: "income",
+        amount: Number(salary.allowance || 0),
+      },
+      {
+        label: t.bonusRow,
+        type: "income",
+        amount: Number(salary.bonus || 0),
+      },
+      {
+        label: t.performanceRow,
+        type: "income",
+        amount: Number(salary.performance || 0),
+      },
+      {
+        label: t.leaveDeductionRow,
+        type: "deduction",
+        amount: Number(salary.leave_deduction || 0),
+      },
+      {
+        label: t.leaveBonusRow,
+        type: "income",
+        amount: Number(salary.leave_bonus || 0),
+      },
+      {
+        label: t.extraFeeRow,
+        type:
+          salary.extra_fee_type === "deduction" ? "deduction" : "income",
+        amount: Number(salary.extra_fee || 0),
+      },
+      {
+        label: t.deductionRow,
+        type: "deduction",
+        amount: Number(salary.deduction || 0),
+      },
+    ].filter((item) => Number(item.amount || 0) !== 0)
+  : []
 
   if (employeeInfo && salary) {
     return (
