@@ -29,6 +29,7 @@ type Payroll = {
   leave_bonus: number
   extra_fee: number
   extra_fee_type: "income" | "deduction" | null
+  deposit: number
   actual_salary: number
   note: string | null
 }
