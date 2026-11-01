@@ -1,17 +1,14 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { supabase } from "../lib/supabase"
 
 type Employee = {
   id: string
   employee_code: string
   name: string
-  password: string
   department: string | null
   position: string | null
   role: string | null
-  security_pin: string | null
   platform: string | null
   account_number: string | null
 }
@@ -235,168 +232,69 @@ export default function LoginPage() {
 
   const isValidPin = (pin: string) => /^\d{4}$/.test(pin)
 
-  const loadLatestPayroll = async (employeeCode: string, user: Employee) => {
-    const { data: payroll, error: payrollError } = await supabase
-      .from("payrolls")
-      .select("*")
-      .eq("employee_code", employeeCode)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle()
+  const api = async (path: string, body: Record<string,string> = {}) => {
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", cache: "no-store", body: JSON.stringify(body) })
+    const json = await res.json()
+    if (!res.ok) throw new Error(json.error || "Request failed")
+    return json
+  }
 
-    if (payrollError) {
-      console.error(payrollError)
-      setError(t.loadError)
-      setEmployeeInfo(user)
-      return
-    }
-
-    if (!payroll) {
-      setEmployeeInfo(user)
+  const loadLatestPayroll = async () => {
+    const result = await api("/api/salary")
+    if (!result.payroll) {
       setError(t.noSalary)
       return
     }
-
-    setEmployeeInfo(user)
-    setSalary(payroll as Payroll)
-    console.log("PAYROLL LOADED =", payroll)
+    setEmployeeInfo(result.employee as Employee)
+    setSalary(result.payroll as Payroll)
   }
 
-  const findEmployeeByLogin = async () => {
-    const employeeCode = employee.trim()
-    const employeePassword = password.trim()
-
-    if (!employeeCode || !employeePassword) {
-      setError(t.pleaseEnter)
-      return null
-    }
-
-    const { data: user, error: userError } = await supabase
-      .from("employees")
-      .select("*")
-      .eq("employee_code", employeeCode)
-      .maybeSingle()
-
-    if (userError) {
-      console.error(userError)
-      setError(t.unknownError)
-      return null
-    }
-
-    if (!user) {
-      setError(t.notFound)
-      return null
-    }
-
-    if (String(user.password).trim() !== employeePassword) {
-      setError(t.wrongPassword)
-      return null
-    }
-
-    return user as Employee
+  const startLogin = async () => {
+    if (!employee.trim() || !password.trim()) { setError(t.pleaseEnter); return }
+    const result = await api("/api/login", { employeeCode: employee.trim(), password })
+    setPendingEmployee({ employee_code: employee.trim() } as Employee)
+    setNewPin(""); setConfirmNewPin(""); setVerifyPin("")
+    setShowCreatePinModal(!result.hasPin)
+    setShowVerifyPinModal(result.hasPin)
   }
 
   const login = async () => {
     try {
-      setLoading(true)
-      setError("")
-      setSalary(null)
-      setEmployeeInfo(null)
-
-      const user = await findEmployeeByLogin()
-      if (!user) return
-
-      setPendingEmployee(user)
-
-      if (!user.security_pin) {
-        setShowCreatePinModal(true)
-        return
-      }
-
-      setShowVerifyPinModal(true)
-    } catch (err) {
-      console.error(err)
-      setError(t.unknownError)
-    } finally {
-      setLoading(false)
-    }
+      setLoading(true); setError(""); setSalary(null); setEmployeeInfo(null)
+      await startLogin()
+    } catch (err) { setError(err instanceof Error ? err.message : t.unknownError) }
+    finally { setLoading(false) }
   }
 
-  const setupPin = async () => {
-    try {
-      setLoading(true)
-      setError("")
-
-      const user = await findEmployeeByLogin()
-      if (!user) return
-
-      setPendingEmployee(user)
-      setNewPin("")
-      setConfirmNewPin("")
-      setShowCreatePinModal(true)
-    } catch (err) {
-      console.error(err)
-      setError(t.unknownError)
-    } finally {
-      setLoading(false)
-    }
-  }
+  const setupPin = login
 
   const handleCreatePin = async () => {
     if (!pendingEmployee) return
-
-    if (!newPin || !confirmNewPin) {
-      setError(t.pinRequired)
-      return
-    }
-
-    if (!isValidPin(newPin) || !isValidPin(confirmNewPin)) {
-      setError(t.pinMustBe4Digits)
-      return
-    }
-
-    if (newPin !== confirmNewPin) {
-      setError(t.pinNotMatch)
-      return
-    }
-
-    const { error: updateError } = await supabase
-      .from("employees")
-      .update({ security_pin: newPin })
-      .eq("id", pendingEmployee.id)
-
-    if (updateError) {
-      console.error(updateError)
-      setError(t.pinSaveFailed)
-      return
-    }
-
-    const updatedEmployee = { ...pendingEmployee, security_pin: newPin }
-    setPendingEmployee(updatedEmployee)
-    setShowCreatePinModal(false)
-    setError("")
-    await loadLatestPayroll(updatedEmployee.employee_code, updatedEmployee)
+    if (!isValidPin(newPin) || !isValidPin(confirmNewPin)) { setError(t.pinMustBe4Digits); return }
+    if (newPin !== confirmNewPin) { setError(t.pinNotMatch); return }
+    try {
+      setLoading(true); setError("")
+      await api("/api/pin/setup", { pin: newPin })
+      setShowCreatePinModal(false); setNewPin(""); setConfirmNewPin("")
+      await loadLatestPayroll()
+    } catch(err) { setError(err instanceof Error ? err.message : t.pinSaveFailed) }
+    finally { setLoading(false) }
   }
 
   const handleVerifyPin = async () => {
     if (!pendingEmployee) return
-
-    if (!verifyPin) {
-      setError(t.pinRequired)
-      return
-    }
-
-    if (String(pendingEmployee.security_pin).trim() !== verifyPin.trim()) {
-      setError(t.pinWrong)
-      return
-    }
-
-    setShowVerifyPinModal(false)
-    setError("")
-    await loadLatestPayroll(pendingEmployee.employee_code, pendingEmployee)
+    if (!isValidPin(verifyPin)) { setError(t.pinMustBe4Digits); return }
+    try {
+      setLoading(true); setError("")
+      await api("/api/pin/verify", { pin: verifyPin })
+      setShowVerifyPinModal(false); setVerifyPin("")
+      await loadLatestPayroll()
+    } catch(err) { setError(err instanceof Error ? err.message : t.pinWrong) }
+    finally { setLoading(false) }
   }
 
   const logout = () => {
+    void api("/api/logout").catch(() => {})
     setEmployee("")
     setPassword("")
     setEmployeeInfo(null)
@@ -687,6 +585,7 @@ export default function LoginPage() {
 
               <button
                 onClick={handleCreatePin}
+                disabled={loading}
                 className="rounded-xl bg-gradient-to-r from-blue-400 to-cyan-500 py-4 text-lg font-bold text-white"
               >
                 {t.confirm}
@@ -726,6 +625,7 @@ export default function LoginPage() {
 
               <button
                 onClick={handleVerifyPin}
+                disabled={loading}
                 className="rounded-xl bg-gradient-to-r from-blue-400 to-cyan-500 py-4 text-lg font-bold text-white"
               >
                 {t.confirm}
