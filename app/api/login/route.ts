@@ -1,18 +1,16 @@
-import { db, getSession, hashActivation, hashPin, responseError, setSession, validActivation, validPin } from "@/lib/server/auth"
-export async function POST(req: Request) {
-  try {
-    const session = await getSession("pending")
-    if (!session) return responseError("Phiên đăng nhập hết hạn", 401)
-    const { pin, activationCode } = await req.json()
-    if (!validPin(pin)) return responseError("PIN phải có đúng 4 số")
-    if (!validActivation(activationCode)) return responseError("Cần mã kích hoạt riêng do quản lý cấp", 403)
-    const database = db()
-    const { data, error } = await database.rpc("activate_employee_pin", {
-      p_id: session.id, p_code_hash: hashActivation(activationCode), p_pin_hash: hashPin(pin)
-    })
-    if (error) throw error
-    if (!data) return responseError("Mã kích hoạt sai, đã sử dụng hoặc tài khoản đã có PIN", 403)
-    await setSession(session.id, "verified")
-    return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } })
-  } catch (err) { console.error("PIN setup error", err); return responseError("Không thể lưu PIN", 500) }
+import { db, clearSession, responseError, setSession } from "@/lib/server/auth"
+import { timingSafeEqual } from "node:crypto"
+export async function POST(req:Request){
+ try {
+  await clearSession()
+  const {employeeCode,password}=await req.json()
+  if(typeof employeeCode!=="string" || typeof password!=="string" || employeeCode.length>100 || password.length>256) return responseError()
+  const {data,error}=await db().from("employees").select("id,password,security_pin,security_pin_hash").eq("employee_code",employeeCode.trim()).maybeSingle()
+  if(error) throw error
+  const actual=String(data?.password ?? "").trim(); const entered=password.trim()
+  const a=Buffer.from(actual);const b=Buffer.from(entered)
+  if(!data || !actual || a.length!==b.length || !timingSafeEqual(a,b)) return responseError("Sai tài khoản hoặc mật khẩu",401)
+  await setSession(data.id,"pending")
+  return Response.json({hasPin:!!(data.security_pin_hash || String(data.security_pin??"").trim())},{headers:{"Cache-Control":"no-store"}})
+ } catch(err){ console.error("Login error",err); return responseError("Lỗi đăng nhập hoặc cấu hình máy chủ",500) }
 }
