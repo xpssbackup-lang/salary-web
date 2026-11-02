@@ -216,6 +216,7 @@ export default function LoginPage() {
   const [newPin, setNewPin] = useState("")
   const [confirmNewPin, setConfirmNewPin] = useState("")
   const [verifyPin, setVerifyPin] = useState("")
+  const [activationCode, setActivationCode] = useState("")
 
   useEffect(() => {
     const savedLanguage = localStorage.getItem("salary-language") as LanguageKey | null
@@ -274,8 +275,8 @@ export default function LoginPage() {
     if (newPin !== confirmNewPin) { setError(t.pinNotMatch); return }
     try {
       setLoading(true); setError("")
-      await api("/api/pin/setup", { pin: newPin })
-      setShowCreatePinModal(false); setNewPin(""); setConfirmNewPin("")
+      await api("/api/pin/setup", { pin: newPin, activationCode: activationCode.trim().toUpperCase() })
+      setShowCreatePinModal(false); setNewPin(""); setConfirmNewPin(""); setActivationCode("")
       await loadLatestPayroll()
     } catch(err) { setError(err instanceof Error ? err.message : t.pinSaveFailed) }
     finally { setLoading(false) }
@@ -571,6 +572,13 @@ export default function LoginPage() {
               onChange={(e) => setConfirmNewPin(e.target.value.replace(/\D/g, ""))}
             />
 
+            <input
+              className="mb-4 w-full rounded-xl border border-white/20 bg-white/15 px-4 py-3 text-center text-base text-white outline-none"
+              placeholder={language === "vi" ? "Mã kích hoạt do quản lý cấp" : language === "en" ? "Manager-issued activation code" : "管理员发放的激活码"}
+              value={activationCode}
+              onChange={(e) => setActivationCode(e.target.value.toUpperCase())}
+              autoComplete="off"
+            />
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => {
