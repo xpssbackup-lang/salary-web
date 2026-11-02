@@ -518,8 +518,7 @@ export default function LoginPage() {
         />
 
         {error && <p className="mb-4 text-sm font-medium text-red-300">{error}</p>}
-
-        <div className="grid grid-cols-2 gap-3">
+<div className="grid grid-cols-2 gap-3">
           <button
             onClick={login}
             disabled={loading}
@@ -618,7 +617,11 @@ export default function LoginPage() {
               value={verifyPin}
               onChange={(e) => setVerifyPin(e.target.value.replace(/\D/g, ""))}
             />
-
+{error && (
+  <p role="alert" className="mb-4 text-center text-sm font-semibold text-red-400">
+    {error}
+  </p>
+)}
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => {
