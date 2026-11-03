@@ -12,8 +12,10 @@ import {
 
 // Official Supabase TEST project hostname.
 // Must match NEXT_PUBLIC_SUPABASE_URL in Vercel Preview.
+
 const TEST_SUPABASE_HOST =
-  "zaqcfhzdqelucrbtebfc.supabase.co"
+  "zaqcfhzdqelucbrtebfc.supabase.co"
+
 
 function isTestPreview(): boolean {
   const vercelEnv = process.env.VERCEL_ENV
