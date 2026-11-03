@@ -49,6 +49,22 @@ export async function POST(req: Request) {
     const database = db()
     const testMode = isTestPreview()
 
+console.log("TEST_PREVIEW_CHECK", {
+  vercelEnv: process.env.VERCEL_ENV ?? "MISSING",
+  flagEnabled:
+    process.env.NEXT_PUBLIC_TEST_PIN_NO_ACTIVATION === "true",
+  supabaseTestMatch: (() => {
+    try {
+      const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+      return !!url &&
+        new URL(url).hostname ===
+          "zaqcfhzdqelucrtebfc.supabase.co"
+    } catch {
+      return false
+    }
+  })(),
+  testMode,
+})
     let data: boolean | null
 
     if (testMode) {
