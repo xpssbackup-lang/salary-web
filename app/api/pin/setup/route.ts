@@ -10,52 +10,66 @@ import {
   validPin,
 } from "@/lib/server/auth"
 
-// Official Supabase TEST project hostname.
-// Must match NEXT_PUBLIC_SUPABASE_URL in Vercel Preview.
+// ========================================
+// SECURITY V2 - PIN ACTIVATION
+// Production: activation code required
+// Test Preview: optional bypass
+// ========================================
 
 const TEST_SUPABASE_HOST =
   "zaqcfhzdqelucbrtebfc.supabase.co"
 
+const PRODUCTION_SUPABASE_HOST =
+  "dhhdmkpjatohqdedbmbd.supabase.co"
 
-function isTestPreview(): boolean {
-  const vercelEnv = process.env.VERCEL_ENV
-  const testFlag =
-    process.env.NEXT_PUBLIC_TEST_PIN_NO_ACTIVATION
+// ========================================
+// CHECK DATABASE HOSTNAME
+// ========================================
 
-  const supabaseUrl =
+function getDatabaseHost(): string | null {
+  const url =
+    process.env.SUPABASE_URL ||
     process.env.NEXT_PUBLIC_SUPABASE_URL
 
-  // Never bypass activation outside Preview.
-  if (vercelEnv !== "preview") {
-    return false
-  }
-
-  // Explicit opt-in is required.
-  if (testFlag !== "true") {
-    return false
-  }
-
-  if (!supabaseUrl) {
-    return false
-  }
+  if (!url) return null
 
   try {
-    const parsed = new URL(supabaseUrl)
+    const parsed = new URL(url)
 
-    return (
-      parsed.protocol === "https:" &&
-      parsed.hostname === TEST_SUPABASE_HOST &&
-      (parsed.pathname === "/" ||
-        parsed.pathname === "")
-    )
+    if (
+      parsed.protocol !== "https:" ||
+      (parsed.pathname !== "/" &&
+        parsed.pathname !== "")
+    ) {
+      return null
+    }
+
+    return parsed.hostname
   } catch {
-    return false
+    return null
   }
 }
 
+// ========================================
+// TEST PREVIEW ONLY
+// ========================================
+
+function isTestPreview(): boolean {
+  return (
+    process.env.VERCEL_ENV === "preview" &&
+    process.env.NEXT_PUBLIC_TEST_PIN_NO_ACTIVATION ===
+      "true" &&
+    getDatabaseHost() === TEST_SUPABASE_HOST
+  )
+}
+
+// ========================================
+// PIN SETUP API
+// ========================================
+
 export async function POST(req: Request) {
   try {
-    // Step 1: Require a valid pending session.
+    // 1. Validate pending session.
     const session = await getSession("pending")
 
     if (!session) {
@@ -65,7 +79,7 @@ export async function POST(req: Request) {
       )
     }
 
-    // Step 2: Validate the requested PIN.
+    // 2. Validate PIN.
     const body = await req.json()
 
     const pin = body?.pin
@@ -80,15 +94,15 @@ export async function POST(req: Request) {
 
     const database = db()
     const testMode = isTestPreview()
+    const databaseHost = getDatabaseHost()
 
     let activated = false
 
     if (testMode) {
-      // PREVIEW + SUPABASE TEST ONLY
-      // No manager-issued activation code.
-      //
-      // The SQL function independently restricts
-      // operations to eligible TESTPIN accounts.
+      // ==================================
+      // SUPABASE TEST + VERCEL PREVIEW
+      // ==================================
+
       const { data, error } = await database.rpc(
         "setup_test_employee_pin",
         {
@@ -99,9 +113,8 @@ export async function POST(req: Request) {
 
       if (error) {
         console.error(
-          "Test PIN setup database error:",
-          error.code,
-          error.message
+          "Test PIN setup error:",
+          error.code
         )
 
         return responseError(
@@ -111,12 +124,34 @@ export async function POST(req: Request) {
       }
 
       activated = data === true
+
+      if (!activated) {
+        return responseError(
+          "Tài khoản đã có PIN hoặc không đủ điều kiện.",
+          403
+        )
+      }
+
+      // Preserve the existing Test flow.
+      await setSession(session.id, "verified")
     } else {
-      // PRODUCTION / NON-TEST ENVIRONMENTS
-      // Keep existing activation requirement.
+      // ==================================
+      // PRODUCTION - ACTIVATION REQUIRED
+      // ==================================
+
+      if (
+        process.env.VERCEL_ENV !== "production" ||
+        databaseHost !== PRODUCTION_SUPABASE_HOST
+      ) {
+        return responseError(
+          "Môi trường kích hoạt không hợp lệ.",
+          503
+        )
+      }
+
       if (!validActivation(activationCode)) {
         return responseError(
-          "Cần mã kích hoạt riêng do quản lý cấp",
+          "Cần mã kích hoạt riêng do quản lý cấp.",
           403
         )
       }
@@ -132,9 +167,8 @@ export async function POST(req: Request) {
 
       if (error) {
         console.error(
-          "PIN activation database error:",
-          error.code,
-          error.message
+          "Production PIN activation error:",
+          error.code
         )
 
         return responseError(
@@ -144,19 +178,29 @@ export async function POST(req: Request) {
       }
 
       activated = data === true
-    }
 
-    // Step 3: Refuse if already initialized
-    // or if the database rejected the request.
-    if (!activated) {
-      return responseError(
-        "Không thể tạo mã PIN. Tài khoản đã có PIN hoặc không đủ điều kiện.",
-        403
+      if (!activated) {
+        return responseError(
+          "Mã kích hoạt không hợp lệ, đã sử dụng hoặc tài khoản đã có PIN.",
+          403
+        )
+      }
+
+      // Production SQL increases session_version
+      // by exactly 1 after activation.
+      //
+      // Reject a session if another reset or
+      // security change occurs before issuance.
+      await setSession(
+        session.id,
+        "verified",
+        session.version + 1
       )
     }
 
-    // Step 4: Upgrade the session.
-    await setSession(session.id, "verified")
+    // ==================================
+    // SUCCESS
+    // ==================================
 
     return Response.json(
       { ok: true },
@@ -170,7 +214,9 @@ export async function POST(req: Request) {
   } catch (error) {
     console.error(
       "PIN setup unexpected error:",
-      error instanceof Error ? error.message : "Unknown error"
+      error instanceof Error
+        ? error.message
+        : "Unknown error"
     )
 
     return responseError(

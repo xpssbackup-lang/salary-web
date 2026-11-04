@@ -12,11 +12,86 @@ import {
   timingSafeEqual,
 } from "node:crypto"
 
+// ========================================
+// SECURITY V2 - LOGIN
+// ========================================
+
 const HASH_PREFIX = "scrypt-pw-v1"
+
+const TEST_SUPABASE_HOST =
+  "zaqcfhzdqelucbrtebfc.supabase.co"
+
+const PRODUCTION_SUPABASE_HOST =
+  "dhhdmkpjatohqdedbmbd.supabase.co"
+
+const INVALID_CREDENTIALS =
+  "Sai tài khoản hoặc mật khẩu"
+
+// ========================================
+// ENVIRONMENT VALIDATION
+// ========================================
+
+function getDatabaseHost(): string | null {
+  const url =
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL
+
+  if (!url) return null
+
+  try {
+    const parsed = new URL(url)
+
+    if (
+      parsed.protocol !== "https:" ||
+      (parsed.pathname !== "/" &&
+        parsed.pathname !== "")
+    ) {
+      return null
+    }
+
+    return parsed.hostname
+  } catch {
+    return null
+  }
+}
+
+function getLoginEnvironment():
+  | "test"
+  | "production"
+  | null {
+  const host = getDatabaseHost()
+  const env = process.env.VERCEL_ENV
+
+  if (
+    env === "preview" &&
+    host === TEST_SUPABASE_HOST
+  ) {
+    return "test"
+  }
+
+  if (
+    env === "production" &&
+    host === PRODUCTION_SUPABASE_HOST
+  ) {
+    return "production"
+  }
+
+  return null
+}
+
+// ========================================
+// PASSWORD HASH
+// ========================================
 
 function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex")
-  const hash = scryptSync(password, salt, 64).toString("hex")
+
+  const hash = scryptSync(
+    password,
+    salt,
+    64
+  ).toString("hex")
+
   return `${HASH_PREFIX}:${salt}:${hash}`
 }
 
@@ -35,11 +110,26 @@ function verifyPassword(
     return false
   }
 
-  const calculated = scryptSync(password, parts[1], 64)
-  const expected = Buffer.from(parts[2], "hex")
+  const calculated = scryptSync(
+    password,
+    parts[1],
+    64
+  )
 
-  return timingSafeEqual(calculated, expected)
+  const expected = Buffer.from(
+    parts[2],
+    "hex"
+  )
+
+  return timingSafeEqual(
+    calculated,
+    expected
+  )
 }
+
+// ========================================
+// LEGACY PASSWORD VERIFICATION
+// ========================================
 
 function verifyLegacyPassword(
   entered: string,
@@ -55,13 +145,51 @@ function verifyLegacyPassword(
   )
 }
 
+// ========================================
+// LOGIN API
+// ========================================
+
 export async function POST(req: Request) {
   try {
+    // Clear previous authentication session.
     await clearSession()
 
-    const body = await req.json()
-    const employeeCode = body?.employeeCode
-    const password = body?.password
+    // Verify deployment/database pairing.
+    const environment = getLoginEnvironment()
+
+    if (!environment) {
+      return responseError(
+        "Môi trường đăng nhập không hợp lệ.",
+        503
+      )
+    }
+
+    // Validate request.
+    let body: unknown
+
+    try {
+      body = await req.json()
+    } catch {
+      return responseError(
+        "Thông tin đăng nhập không hợp lệ.",
+        400
+      )
+    }
+
+    if (
+      !body ||
+      typeof body !== "object"
+    ) {
+      return responseError(
+        "Thông tin đăng nhập không hợp lệ.",
+        400
+      )
+    }
+
+    const input = body as Record<string, unknown>
+
+    const employeeCode = input.employeeCode
+    const password = input.password
 
     if (
       typeof employeeCode !== "string" ||
@@ -71,17 +199,25 @@ export async function POST(req: Request) {
       employeeCode.length > 100 ||
       password.length > 256
     ) {
-      return responseError("Thông tin đăng nhập không hợp lệ", 400)
+      return responseError(
+        "Thông tin đăng nhập không hợp lệ.",
+        400
+      )
     }
 
     const code = employeeCode.trim()
     const enteredPassword = password.trim()
+
     const database = db()
+
+    // ====================================
+    // LOAD EMPLOYEE
+    // ====================================
 
     const { data, error } = await database
       .from("employees")
       .select(
-        "id,password,password_hash,security_pin,security_pin_hash,session_version"
+        "id,employee_code,password,password_hash,security_pin,security_pin_hash,session_version"
       )
       .eq("employee_code", code)
       .maybeSingle()
@@ -89,70 +225,154 @@ export async function POST(req: Request) {
     if (error) throw error
 
     if (!data) {
-      return responseError("Sai tài khoản hoặc mật khẩu", 401)
+      return responseError(
+        INVALID_CREDENTIALS,
+        401
+      )
     }
 
-    const storedHash = data.password_hash
-    const legacy = String(data.password ?? "")
+    // ====================================
+    // VERIFY PASSWORD
+    // ====================================
+
+    const storedHash =
+      typeof data.password_hash === "string"
+        ? data.password_hash
+        : null
+
+    const legacy =
+      typeof data.password === "string"
+        ? data.password
+        : ""
 
     const valid = storedHash
-      ? verifyPassword(enteredPassword, storedHash)
-      : verifyLegacyPassword(enteredPassword, legacy)
+      ? verifyPassword(
+          enteredPassword,
+          storedHash
+        )
+      : verifyLegacyPassword(
+          enteredPassword,
+          legacy
+        )
 
-    // Atomic password attempt counter and lock check.
-    const { data: result, error: rateError } =
-      await database.rpc("record_password_verification", {
+    // ====================================
+    // RECORD FAILED ATTEMPTS / LOCKOUT
+    // ====================================
+
+    const {
+      data: verificationResult,
+      error: verificationError,
+    } = await database.rpc(
+      "record_password_verification",
+      {
         p_id: data.id,
         p_valid: valid,
-      })
+      }
+    )
 
-    if (rateError) throw rateError
+    if (verificationError) {
+      throw verificationError
+    }
 
-    if (result === "locked") {
+    if (verificationResult === "locked") {
       return responseError(
         "Đăng nhập tạm khóa 15 phút. Vui lòng thử lại sau.",
         429
       )
     }
 
-    if (result !== "ok") {
+    if (verificationResult !== "ok") {
       return responseError(
-        "Sai tài khoản hoặc mật khẩu",
+        INVALID_CREDENTIALS,
         401
       )
     }
 
-    // Migrate legacy TESTPIN passwords only.
-    if (!storedHash && /^TESTPIN[0-9]{3}$/.test(code)) {
-      const newHash = hashPassword(enteredPassword)
+    // ====================================
+    // LEGACY PASSWORD MIGRATION
+    // ====================================
 
-      const { data: migrated, error: migrationError } =
-        await database.rpc("migrate_test_password", {
+    let expectedVersion = data.session_version
+
+    if (
+      !Number.isSafeInteger(expectedVersion) ||
+      expectedVersion < 1
+    ) {
+      return responseError(
+        "Phiên bảo mật không hợp lệ.",
+        401
+      )
+    }
+
+    if (!storedHash) {
+      let migrationFunction: string
+
+      if (environment === "test") {
+        if (!/^TESTPIN[0-9]{3}$/.test(code)) {
+          return responseError(
+            "Tài khoản thử nghiệm không hợp lệ.",
+            403
+          )
+        }
+
+        migrationFunction =
+          "migrate_test_password"
+      } else {
+        migrationFunction =
+          "migrate_employee_password"
+      }
+
+      const newHash = hashPassword(
+        enteredPassword
+      )
+
+      const {
+        data: migrated,
+        error: migrationError,
+      } = await database.rpc(
+        migrationFunction,
+        {
           p_id: data.id,
           p_old_password: legacy,
           p_new_hash: newHash,
-        })
+        }
+      )
 
-      if (migrationError) throw migrationError
+      if (migrationError) {
+        throw migrationError
+      }
 
       if (migrated !== true) {
         return responseError(
-          "Tài khoản vừa thay đổi bảo mật. Vui lòng đăng nhập lại.",
+          "Tài khoản vừa được cập nhật bảo mật. Vui lòng đăng nhập lại.",
           409
         )
       }
 
       // Migration increments session_version.
-      await setSession(data.id, "pending")
-    } else {
-      // Reject a session if its version changed
-      // after the initial account lookup.
+      expectedVersion += 1
+    }
+
+    // ====================================
+    // CREATE PENDING SESSION
+    // ====================================
+
+    try {
       await setSession(
         data.id,
         "pending",
-        data.session_version
+        expectedVersion
+      )
+    } catch {
+      return responseError(
+        "Phiên bảo mật đã thay đổi. Vui lòng đăng nhập lại.",
+        409
       )
     }
+
+    // ====================================
+    // DETERMINE PIN STATUS
+    // ====================================
 
     const hasPin = Boolean(
       data.security_pin_hash ||
@@ -161,16 +381,23 @@ export async function POST(req: Request) {
 
     return Response.json(
       { hasPin },
-      { headers: { "Cache-Control": "no-store" } }
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
     )
   } catch (err) {
     console.error(
-      "Login error",
-      err instanceof Error ? err.message : "Unknown error"
+      "Login error:",
+      err instanceof Error
+        ? err.message
+        : "Unknown error"
     )
 
     return responseError(
-      "Lỗi đăng nhập hoặc cấu hình máy chủ",
+      "Lỗi đăng nhập hoặc cấu hình máy chủ.",
       500
     )
   }
