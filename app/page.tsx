@@ -279,9 +279,7 @@ const testNoActivation =
       setLoading(true); setError("")
       await api("/api/pin/setup", {
   pin: newPin,
-  ...(!testNoActivation
-    ? { activationCode: activationCode.trim().toUpperCase() }
-    : {}),
+
 })
       setShowCreatePinModal(false); setNewPin(""); setConfirmNewPin(""); setActivationCode("")
       await loadLatestPayroll()
@@ -578,13 +576,7 @@ const testNoActivation =
               onChange={(e) => setConfirmNewPin(e.target.value.replace(/\D/g, ""))}
             />
 
-            {!testNoActivation && (<input
-              className="mb-4 w-full rounded-xl border border-white/20 bg-white/15 px-4 py-3 text-center text-base text-white outline-none"
-              placeholder={language === "vi" ? "Mã kích hoạt do quản lý cấp" : language === "en" ? "Manager-issued activation code" : "管理员发放的激活码"}
-              value={activationCode}
-              onChange={(e) => setActivationCode(e.target.value.toUpperCase())}
-              autoComplete="off"
-            />)}
+            
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => {

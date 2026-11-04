@@ -2,18 +2,22 @@
 import {
   db,
   getSession,
-  hashActivation,
   hashPin,
   responseError,
   setSession,
-  validActivation,
   validPin,
 } from "@/lib/server/auth"
 
 // ========================================
-// SECURITY V2 - PIN ACTIVATION
-// Production: activation code required
-// Test Preview: optional bypass
+// SECURITY V2 - PIN SETUP
+//
+// TEST / PREVIEW:
+//   setup_test_employee_pin
+//
+// PRODUCTION:
+//   setup_employee_pin_v2
+//
+// No manager activation code required.
 // ========================================
 
 const TEST_SUPABASE_HOST =
@@ -23,7 +27,7 @@ const PRODUCTION_SUPABASE_HOST =
   "dhhdmkpjatohqdedbmbd.supabase.co"
 
 // ========================================
-// CHECK DATABASE HOSTNAME
+// VERIFY SUPABASE ENVIRONMENT
 // ========================================
 
 function getDatabaseHost(): string | null {
@@ -50,26 +54,50 @@ function getDatabaseHost(): string | null {
   }
 }
 
-// ========================================
-// TEST PREVIEW ONLY
-// ========================================
+function getEnvironment():
+  | "test"
+  | "production"
+  | null {
+  const host = getDatabaseHost()
+  const environment = process.env.VERCEL_ENV
 
-function isTestPreview(): boolean {
-  return (
-    process.env.VERCEL_ENV === "preview" &&
-    process.env.NEXT_PUBLIC_TEST_PIN_NO_ACTIVATION ===
-      "true" &&
-    getDatabaseHost() === TEST_SUPABASE_HOST
-  )
+  if (
+    environment === "preview" &&
+    host === TEST_SUPABASE_HOST &&
+    process.env
+      .NEXT_PUBLIC_TEST_PIN_NO_ACTIVATION ===
+      "true"
+  ) {
+    return "test"
+  }
+
+  if (
+    environment === "production" &&
+    host === PRODUCTION_SUPABASE_HOST
+  ) {
+    return "production"
+  }
+
+  return null
 }
 
 // ========================================
-// PIN SETUP API
+// CREATE PIN API
 // ========================================
 
 export async function POST(req: Request) {
   try {
-    // 1. Validate pending session.
+    // Step 1: Verify deployment environment.
+    const environment = getEnvironment()
+
+    if (!environment) {
+      return responseError(
+        "Môi trường thiết lập PIN không hợp lệ.",
+        503
+      )
+    }
+
+    // Step 2: Require a pending login session.
     const session = await getSession("pending")
 
     if (!session) {
@@ -79,12 +107,33 @@ export async function POST(req: Request) {
       )
     }
 
-    // 2. Validate PIN.
-    const body = await req.json()
+    // Step 3: Read PIN request.
+    let body: unknown
 
-    const pin = body?.pin
-    const activationCode = body?.activationCode
+    try {
+      body = await req.json()
+    } catch {
+      return responseError(
+        "Dữ liệu không hợp lệ.",
+        400
+      )
+    }
 
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body)
+    ) {
+      return responseError(
+        "Dữ liệu không hợp lệ.",
+        400
+      )
+    }
+
+    const input = body as Record<string, unknown>
+    const pin = input.pin
+
+    // PIN must be exactly 4 digits.
     if (!validPin(pin)) {
       return responseError(
         "Mã PIN phải có đúng 4 chữ số.",
@@ -93,114 +142,117 @@ export async function POST(req: Request) {
     }
 
     const database = db()
-    const testMode = isTestPreview()
-    const databaseHost = getDatabaseHost()
+    const pinHash = hashPin(pin)
 
     let activated = false
 
-    if (testMode) {
-      // ==================================
-      // SUPABASE TEST + VERCEL PREVIEW
-      // ==================================
+    // ====================================
+    // TEST / PREVIEW
+    // ====================================
 
+    if (environment === "test") {
       const { data, error } = await database.rpc(
         "setup_test_employee_pin",
         {
           p_id: session.id,
-          p_pin_hash: hashPin(pin),
+          p_pin_hash: pinHash,
         }
       )
 
       if (error) {
         console.error(
           "Test PIN setup error:",
-          error.code
+          error.code,
+          error.message
         )
 
         return responseError(
-          "Không thể tạo mã PIN thử nghiệm.",
+          "Không thể thiết lập PIN thử nghiệm.",
           500
         )
       }
 
       activated = data === true
+    }
 
-      if (!activated) {
-        return responseError(
-          "Tài khoản đã có PIN hoặc không đủ điều kiện.",
-          403
-        )
-      }
+    // ====================================
+    // PRODUCTION
+    // ====================================
 
-      // Preserve the existing Test flow.
-      await setSession(session.id, "verified")
-    } else {
-      // ==================================
-      // PRODUCTION - ACTIVATION REQUIRED
-      // ==================================
-
-      if (
-        process.env.VERCEL_ENV !== "production" ||
-        databaseHost !== PRODUCTION_SUPABASE_HOST
-      ) {
-        return responseError(
-          "Môi trường kích hoạt không hợp lệ.",
-          503
-        )
-      }
-
-      if (!validActivation(activationCode)) {
-        return responseError(
-          "Cần mã kích hoạt riêng do quản lý cấp.",
-          403
-        )
-      }
-
+    if (environment === "production") {
       const { data, error } = await database.rpc(
-        "activate_employee_pin",
+        "setup_employee_pin_v2",
         {
           p_id: session.id,
-          p_code_hash: hashActivation(activationCode),
-          p_pin_hash: hashPin(pin),
+          p_pin_hash: pinHash,
+          p_expected_version: session.version,
         }
       )
 
       if (error) {
         console.error(
-          "Production PIN activation error:",
-          error.code
+          "Production PIN setup error:",
+          error.code,
+          error.message
         )
 
         return responseError(
-          "Không thể kích hoạt mã PIN.",
+          "Không thể thiết lập mã PIN.",
           500
         )
       }
 
       activated = data === true
+    }
 
-      if (!activated) {
-        return responseError(
-          "Mã kích hoạt không hợp lệ, đã sử dụng hoặc tài khoản đã có PIN.",
-          403
-        )
-      }
+    // ====================================
+    // HANDLE FAILED SETUP
+    // ====================================
 
-      // Production SQL increases session_version
-      // by exactly 1 after activation.
-      //
-      // Reject a session if another reset or
-      // security change occurs before issuance.
-      await setSession(
-        session.id,
-        "verified",
-        session.version + 1
+    if (!activated) {
+      return responseError(
+        "Không thể tạo PIN. Tài khoản đã có PIN hoặc phiên bảo mật đã thay đổi. Vui lòng đăng nhập lại.",
+        409
       )
     }
 
-    // ==================================
+    // ====================================
+    // CREATE VERIFIED SESSION
+    // ====================================
+
+    try {
+      if (environment === "production") {
+        // Production SQL increments
+        // session_version by exactly 1.
+        await setSession(
+          session.id,
+          "verified",
+          session.version + 1
+        )
+      } else {
+        // Preserve existing Test behavior.
+        await setSession(
+          session.id,
+          "verified"
+        )
+      }
+    } catch (sessionError) {
+      console.error(
+        "PIN session creation failed:",
+        sessionError instanceof Error
+          ? sessionError.message
+          : "Unknown error"
+      )
+
+      return responseError(
+        "PIN đã được tạo nhưng không thể mở phiên. Vui lòng đăng nhập lại bằng PIN vừa tạo.",
+        409
+      )
+    }
+
+    // ====================================
     // SUCCESS
-    // ==================================
+    // ====================================
 
     return Response.json(
       { ok: true },
