@@ -60,7 +60,6 @@ export async function POST(req: Request) {
     await clearSession()
 
     const body = await req.json()
-
     const employeeCode = body?.employeeCode
     const password = body?.password
 
@@ -75,6 +74,8 @@ export async function POST(req: Request) {
       return responseError("Thông tin đăng nhập không hợp lệ", 400)
     }
 
+    const code = employeeCode.trim()
+    const enteredPassword = password.trim()
     const database = db()
 
     const { data, error } = await database
@@ -82,7 +83,7 @@ export async function POST(req: Request) {
       .select(
         "id,password,password_hash,security_pin,security_pin_hash,session_version"
       )
-      .eq("employee_code", employeeCode.trim())
+      .eq("employee_code", code)
       .maybeSingle()
 
     if (error) throw error
@@ -92,43 +93,66 @@ export async function POST(req: Request) {
     }
 
     const storedHash = data.password_hash
+    const legacy = String(data.password ?? "")
 
-    if (storedHash) {
-      if (!verifyPassword(password.trim(), storedHash)) {
-        return responseError("Sai tài khoản hoặc mật khẩu", 401)
-      }
-    } else {
-      const legacy = String(data.password ?? "")
+    const valid = storedHash
+      ? verifyPassword(enteredPassword, storedHash)
+      : verifyLegacyPassword(enteredPassword, legacy)
 
-      if (!verifyLegacyPassword(password, legacy)) {
-        return responseError("Sai tài khoản hoặc mật khẩu", 401)
-      }
+    // Atomic password attempt counter and lock check.
+    const { data: result, error: rateError } =
+      await database.rpc("record_password_verification", {
+        p_id: data.id,
+        p_valid: valid,
+      })
 
-      // Only migrate dedicated TESTPIN accounts.
-      if (/^TESTPIN[0-9]{3}$/.test(employeeCode.trim())) {
-        const newHash = hashPassword(password.trim())
+    if (rateError) throw rateError
 
-        const { data: migrated, error: migrationError } =
-          await database.rpc("migrate_test_password", {
-            p_id: data.id,
-            p_old_password: legacy,
-            p_new_hash: newHash,
-          })
-
-        if (migrationError) throw migrationError
-
-        if (migrated !== true) {
-          // Another login may have migrated this account.
-          // Request a fresh login rather than using stale credentials.
-          return responseError(
-            "Tài khoản vừa được cập nhật bảo mật. Vui lòng đăng nhập lại.",
-            409
-          )
-        }
-      }
+    if (result === "locked") {
+      return responseError(
+        "Đăng nhập tạm khóa 15 phút. Vui lòng thử lại sau.",
+        429
+      )
     }
 
-    await setSession(data.id, "pending")
+    if (result !== "ok") {
+      return responseError(
+        "Sai tài khoản hoặc mật khẩu",
+        401
+      )
+    }
+
+    // Migrate legacy TESTPIN passwords only.
+    if (!storedHash && /^TESTPIN[0-9]{3}$/.test(code)) {
+      const newHash = hashPassword(enteredPassword)
+
+      const { data: migrated, error: migrationError } =
+        await database.rpc("migrate_test_password", {
+          p_id: data.id,
+          p_old_password: legacy,
+          p_new_hash: newHash,
+        })
+
+      if (migrationError) throw migrationError
+
+      if (migrated !== true) {
+        return responseError(
+          "Tài khoản vừa thay đổi bảo mật. Vui lòng đăng nhập lại.",
+          409
+        )
+      }
+
+      // Migration increments session_version.
+      await setSession(data.id, "pending")
+    } else {
+      // Reject a session if its version changed
+      // after the initial account lookup.
+      await setSession(
+        data.id,
+        "pending",
+        data.session_version
+      )
+    }
 
     const hasPin = Boolean(
       data.security_pin_hash ||
@@ -137,11 +161,7 @@ export async function POST(req: Request) {
 
     return Response.json(
       { hasPin },
-      {
-        headers: {
-          "Cache-Control": "no-store",
-        },
-      }
+      { headers: { "Cache-Control": "no-store" } }
     )
   } catch (err) {
     console.error(
