@@ -6,7 +6,54 @@ import {
   setSession,
 } from "@/lib/server/auth"
 
-import { timingSafeEqual } from "node:crypto"
+import {
+  randomBytes,
+  scryptSync,
+  timingSafeEqual,
+} from "node:crypto"
+
+const HASH_PREFIX = "scrypt-pw-v1"
+
+function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString("hex")
+  const hash = scryptSync(password, salt, 64).toString("hex")
+  return `${HASH_PREFIX}:${salt}:${hash}`
+}
+
+function verifyPassword(
+  password: string,
+  storedHash: string
+): boolean {
+  const parts = storedHash.split(":")
+
+  if (
+    parts.length !== 3 ||
+    parts[0] !== HASH_PREFIX ||
+    !/^[a-f0-9]{32}$/.test(parts[1]) ||
+    !/^[a-f0-9]{128}$/.test(parts[2])
+  ) {
+    return false
+  }
+
+  const calculated = scryptSync(password, parts[1], 64)
+  const expected = Buffer.from(parts[2], "hex")
+
+  return timingSafeEqual(calculated, expected)
+}
+
+function verifyLegacyPassword(
+  entered: string,
+  stored: string
+): boolean {
+  const actual = Buffer.from(stored.trim())
+  const input = Buffer.from(entered.trim())
+
+  return (
+    actual.length > 0 &&
+    actual.length === input.length &&
+    timingSafeEqual(actual, input)
+  )
+}
 
 export async function POST(req: Request) {
   try {
@@ -20,10 +67,12 @@ export async function POST(req: Request) {
     if (
       typeof employeeCode !== "string" ||
       typeof password !== "string" ||
+      !employeeCode.trim() ||
+      !password.trim() ||
       employeeCode.length > 100 ||
       password.length > 256
     ) {
-      return responseError("Thông tin không hợp lệ", 400)
+      return responseError("Thông tin đăng nhập không hợp lệ", 400)
     }
 
     const database = db()
@@ -31,43 +80,54 @@ export async function POST(req: Request) {
     const { data, error } = await database
       .from("employees")
       .select(
-        "id,password,security_pin,security_pin_hash,session_version"
+        "id,password,password_hash,security_pin,security_pin_hash,session_version"
       )
       .eq("employee_code", employeeCode.trim())
       .maybeSingle()
 
     if (error) throw error
 
-    const actual = String(data?.password ?? "").trim()
-    const entered = password.trim()
-
-    const actualBuffer = Buffer.from(actual)
-    const enteredBuffer = Buffer.from(entered)
-
-    const passwordMatches =
-      actual.length > 0 &&
-      actualBuffer.length === enteredBuffer.length &&
-      timingSafeEqual(actualBuffer, enteredBuffer)
-
-    if (!data || !passwordMatches) {
-      return responseError(
-        "Sai tài khoản hoặc mật khẩu",
-        401
-      )
+    if (!data) {
+      return responseError("Sai tài khoản hoặc mật khẩu", 401)
     }
 
-    if (
-      !Number.isSafeInteger(data.session_version) ||
-      data.session_version < 1
-    ) {
-      return responseError(
-        "Tài khoản chưa được cấu hình phiên bảo mật",
-        500
-      )
+    const storedHash = data.password_hash
+
+    if (storedHash) {
+      if (!verifyPassword(password.trim(), storedHash)) {
+        return responseError("Sai tài khoản hoặc mật khẩu", 401)
+      }
+    } else {
+      const legacy = String(data.password ?? "")
+
+      if (!verifyLegacyPassword(password, legacy)) {
+        return responseError("Sai tài khoản hoặc mật khẩu", 401)
+      }
+
+      // Only migrate dedicated TESTPIN accounts.
+      if (/^TESTPIN[0-9]{3}$/.test(employeeCode.trim())) {
+        const newHash = hashPassword(password.trim())
+
+        const { data: migrated, error: migrationError } =
+          await database.rpc("migrate_test_password", {
+            p_id: data.id,
+            p_old_password: legacy,
+            p_new_hash: newHash,
+          })
+
+        if (migrationError) throw migrationError
+
+        if (migrated !== true) {
+          // Another login may have migrated this account.
+          // Request a fresh login rather than using stale credentials.
+          return responseError(
+            "Tài khoản vừa được cập nhật bảo mật. Vui lòng đăng nhập lại.",
+            409
+          )
+        }
+      }
     }
 
-    // setSession reads the current version
-    // from Supabase and creates a signed session.
     await setSession(data.id, "pending")
 
     const hasPin = Boolean(
