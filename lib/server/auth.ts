@@ -21,6 +21,10 @@ type Session = {
   version: number
 }
 
+// ========================================
+// SESSION AND PIN SECRETS
+// ========================================
+
 const sessionKey = () => {
   const secret = process.env.SESSION_SECRET
 
@@ -41,6 +45,10 @@ const pinKey = () => {
   return secret
 }
 
+// ========================================
+// SUPABASE SERVER CLIENT
+// ========================================
+
 export const db = () => {
   const url =
     process.env.SUPABASE_URL ||
@@ -60,11 +68,19 @@ export const db = () => {
   })
 }
 
+// ========================================
+// SESSION SIGNATURE
+// ========================================
+
 function sign(body: string): string {
   return createHmac("sha256", sessionKey())
     .update(body)
     .digest("hex")
 }
+
+// ========================================
+// GET CURRENT SESSION VERSION
+// ========================================
 
 async function getSessionVersion(
   employeeId: string
@@ -90,18 +106,36 @@ async function getSessionVersion(
   return data.session_version
 }
 
+// ========================================
+// CREATE SESSION
+// ========================================
+
 export async function setSession(
   id: string,
-  stage: SessionStage
+  stage: SessionStage,
+  expectedVersion?: number
 ) {
   const version = await getSessionVersion(id)
 
   if (version === null) {
-    throw new Error("Employee session version unavailable")
+    throw new Error(
+      "Employee session version unavailable"
+    )
+  }
+
+  // Prevent issuing a verified session
+  // using an outdated session version.
+  if (
+    expectedVersion !== undefined &&
+    version !== expectedVersion
+  ) {
+    throw new Error("Session version changed")
   }
 
   const duration =
-    stage === "pending" ? 5 * 60_000 : 30 * 60_000
+    stage === "pending"
+      ? 5 * 60_000
+      : 30 * 60_000
 
   const expires = Date.now() + duration
 
@@ -127,12 +161,18 @@ export async function setSession(
   })
 }
 
+// ========================================
+// VERIFY SESSION
+// ========================================
+
 export async function getSession(
   stage: SessionStage
 ): Promise<Session | null> {
   const value = (await cookies()).get(NAME)?.value
 
-  if (!value) return null
+  if (!value) {
+    return null
+  }
 
   const [body, mac, ...extra] = value.split(".")
 
@@ -146,8 +186,15 @@ export async function getSession(
     return null
   }
 
-  const expected = Buffer.from(sign(body), "hex")
-  const provided = Buffer.from(mac, "hex")
+  const expected = Buffer.from(
+    sign(body),
+    "hex"
+  )
+
+  const provided = Buffer.from(
+    mac,
+    "hex"
+  )
 
   if (!timingSafeEqual(expected, provided)) {
     return null
@@ -157,7 +204,8 @@ export async function getSession(
 
   try {
     session = JSON.parse(
-      Buffer.from(body, "base64url").toString("utf8")
+      Buffer.from(body, "base64url")
+        .toString("utf8")
     ) as Session
   } catch {
     return null
@@ -167,7 +215,9 @@ export async function getSession(
     !session ||
     session.stage !== stage ||
     typeof session.id !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.id) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      session.id
+    ) ||
     !Number.isSafeInteger(session.expires) ||
     session.expires <= Date.now() ||
     !Number.isSafeInteger(session.version) ||
@@ -176,8 +226,7 @@ export async function getSession(
     return null
   }
 
-  // Check that the employee still has
-  // the same session version in Supabase.
+  // Reject sessions revoked by administrators.
   const currentVersion =
     await getSessionVersion(session.id)
 
@@ -191,9 +240,17 @@ export async function getSession(
   return session
 }
 
+// ========================================
+// CLEAR SESSION
+// ========================================
+
 export async function clearSession() {
   ;(await cookies()).delete(NAME)
 }
+
+// ========================================
+// PIN HASHING
+// ========================================
 
 const derive = (
   secret: string,
@@ -231,18 +288,41 @@ export const matchesPin = (
       ? sessionKey()
       : pinKey()
 
+  const calculated = derive(
+    secret,
+    parts[1],
+    pin
+  )
+
+  const expected = Buffer.from(
+    parts[2],
+    "hex"
+  )
+
   return timingSafeEqual(
-    derive(secret, parts[1], pin),
-    Buffer.from(parts[2], "hex")
+    calculated,
+    expected
   )
 }
 
+// ========================================
+// ACTIVATION CODE HASH
+// ========================================
+
 export const hashActivation = (
   code: string
-): string =>
-  createHmac("sha256", pinKey())
+): string => {
+  return createHmac(
+    "sha256",
+    pinKey()
+  )
     .update(`activate-v1:${code}`)
     .digest("hex")
+}
+
+// ========================================
+// INPUT VALIDATION
+// ========================================
 
 export const validActivation = (
   value: unknown
@@ -255,6 +335,10 @@ export const validPin = (
 ): value is string =>
   typeof value === "string" &&
   /^\d{4}$/.test(value)
+
+// ========================================
+// API ERROR RESPONSE
+// ========================================
 
 export function responseError(
   message = "Invalid request",
